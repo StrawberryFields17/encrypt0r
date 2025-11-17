@@ -19,13 +19,32 @@ PBKDF2_ITERATIONS = 390000  # reasonably strong
 
 # Dark theme colors
 BG_MAIN = "#020617"      # almost black (slate-950)
-BG_PANEL = "#020617"
 BG_INPUT = "#020617"
 FG_TEXT = "#e5e7eb"      # gray-200
 FG_SUBTLE = "#9ca3af"    # gray-400
 ACCENT = "#22c55e"       # green-500
 ACCENT_DARK = "#16a34a"  # green-600
-ERROR_RED = "#f97373"    # light red
+
+
+# ---------- High DPI / anti-blur for Windows ----------
+
+def enable_high_dpi():
+    """
+    Enable high-DPI awareness on Windows so the UI is crisp at 150% / 200% scaling.
+    Safe no-op on other platforms.
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            try:
+                # Windows 8.1+ per-monitor DPI awareness
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                # Older Windows versions
+                ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            # If anything fails, just ignore and continue
+            pass
 
 
 # ---------- Crypto helpers ----------
@@ -173,34 +192,48 @@ class Encrypt0rApp:
         except Exception:
             pass
 
+        default_font = ("Segoe UI", 10)
+        title_font = ("Segoe UI", 16, "bold")
+
         self.style.configure("Encrypt0r.TFrame", background=BG_MAIN)
         self.style.configure("Encrypt0r.TLabel",
                              background=BG_MAIN,
-                             foreground=FG_TEXT)
+                             foreground=FG_TEXT,
+                             font=default_font)
         self.style.configure("Encrypt0r.Subtle.TLabel",
                              background=BG_MAIN,
-                             foreground=FG_SUBTLE)
+                             foreground=FG_SUBTLE,
+                             font=("Segoe UI", 9))
         self.style.configure("Encrypt0r.TEntry",
                              fieldbackground=BG_INPUT,
                              foreground=FG_TEXT,
-                             bordercolor="#0f172a",
-                             lightcolor="#0f172a",
+                             bordercolor="#111827",
+                             lightcolor="#111827",
                              darkcolor="#020617")
         self.style.configure("Encrypt0r.TButton",
                              background=ACCENT,
                              foreground="#020617",
                              borderwidth=0,
                              focusthickness=1,
-                             focuscolor=ACCENT_DARK)
+                             focuscolor=ACCENT_DARK,
+                             font=default_font,
+                             padding=(10, 4))
         self.style.map("Encrypt0r.TButton",
                        background=[("active", ACCENT_DARK)])
 
         self.style.configure("Encrypt0r.Secondary.TButton",
                              background="#111827",
                              foreground=FG_TEXT,
-                             borderwidth=0)
+                             borderwidth=0,
+                             font=default_font,
+                             padding=(10, 4))
         self.style.map("Encrypt0r.Secondary.TButton",
                        background=[("active", "#1f2937")])
+
+        self.style.configure("Encrypt0r.TCheckbutton",
+                             background=BG_MAIN,
+                             foreground=FG_SUBTLE,
+                             font=("Segoe UI", 9))
 
         # Main frame
         frame = ttk.Frame(master, style="Encrypt0r.TFrame", padding=(16, 16, 16, 16))
@@ -210,16 +243,15 @@ class Encrypt0rApp:
 
         # Header
         title_label = ttk.Label(frame, text="encrypt0r", style="Encrypt0r.TLabel",
-                                font=("Segoe UI", 16, "bold"))
+                                font=title_font)
         title_label.grid(row=0, column=0, columnspan=3, sticky="w")
 
         subtitle_label = ttk.Label(
             frame,
             text="Encrypt and decrypt folders with a single password.",
-            style="Encrypt0r.Subtle.TLabel",
-            font=("Segoe UI", 10)
+            style="Encrypt0r.Subtle.TLabel"
         )
-        subtitle_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        subtitle_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
         # Folder selection
         folder_label = ttk.Label(frame, text="Folder", style="Encrypt0r.TLabel")
@@ -235,7 +267,7 @@ class Encrypt0rApp:
                                         command=self.browse_folder)
         self.browse_button.grid(row=2, column=2, pady=5, sticky="we")
 
-        # Password
+        # Password row
         password_label = ttk.Label(frame, text="Password", style="Encrypt0r.TLabel")
         password_label.grid(row=3, column=0, padx=(0, 8), pady=5, sticky="e")
 
@@ -244,23 +276,21 @@ class Encrypt0rApp:
                                         show="*", width=50, style="Encrypt0r.TEntry")
         self.password_entry.grid(row=3, column=1, padx=(0, 8), pady=5, sticky="we")
 
-        # Copy password + show toggle
-        password_buttons_frame = ttk.Frame(frame, style="Encrypt0r.TFrame")
-        password_buttons_frame.grid(row=3, column=2, pady=5, sticky="we")
-
+        # Right side: copy button
         self.copy_password_button = ttk.Button(
-            password_buttons_frame,
-            text="Copy",
+            frame,
+            text="Copy password",
             style="Encrypt0r.Secondary.TButton",
             command=self.copy_password_to_clipboard
         )
-        self.copy_password_button.grid(row=0, column=0, padx=(0, 0), sticky="we")
+        self.copy_password_button.grid(row=3, column=2, pady=5, sticky="we")
 
+        # Show password toggle
         self.show_password_var = tk.BooleanVar(value=False)
         self.show_password_checkbox = ttk.Checkbutton(
             frame,
             text="Show password",
-            style="Encrypt0r.Subtle.TLabel",
+            style="Encrypt0r.TCheckbutton",
             variable=self.show_password_var,
             command=self.toggle_password_visibility
         )
@@ -280,10 +310,10 @@ class Encrypt0rApp:
         self.delete_checkbox = ttk.Checkbutton(
             frame,
             text="Delete original files after encryption (recommended)",
-            style="Encrypt0r.Subtle.TLabel",
+            style="Encrypt0r.TCheckbutton",
             variable=self.delete_originals_var
         )
-        self.delete_checkbox.grid(row=6, column=1, pady=(0, 10), sticky="w")
+        self.delete_checkbox.grid(row=6, column=1, pady=(0, 12), sticky="w")
 
         # Buttons row
         buttons_frame = ttk.Frame(frame, style="Encrypt0r.TFrame")
@@ -310,13 +340,29 @@ class Encrypt0rApp:
         log_label.grid(row=8, column=0, columnspan=3, sticky="w")
 
         self.log_text = ScrolledText(frame, height=13, width=80)
-        self.log_text.grid(row=9, column=0, columnspan=3, padx=(0, 0), pady=(4, 0), sticky="nsew")
-        self.log_text.configure(bg="#020617", fg=FG_SUBTLE, insertbackground=FG_TEXT, borderwidth=1,
-                                relief="solid")
+        self.log_text.grid(row=9, column=0, columnspan=3, padx=0, pady=(4, 0), sticky="nsew")
+        self.log_text.configure(
+            bg=BG_MAIN,
+            fg=FG_SUBTLE,
+            insertbackground=FG_TEXT,
+            borderwidth=1,
+            relief="solid",
+            font=("Segoe UI", 9)
+        )
 
         # Layout stretch
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(9, weight=1)
+
+        # Center window a bit (optional quality of life)
+        master.update_idletasks()
+        w = 780
+        h = 520
+        sw = master.winfo_screenwidth()
+        sh = master.winfo_screenheight()
+        x = int((sw - w) / 2)
+        y = int((sh - h) / 2)
+        master.geometry(f"{w}x{h}+{x}+{y}")
 
     # ---------- UI helpers ----------
 
@@ -358,12 +404,14 @@ class Encrypt0rApp:
         if not pwd:
             messagebox.showwarning(APP_NAME, "Password field is empty.")
             return
-        # Copy to clipboard
         self.master.clipboard_clear()
         self.master.clipboard_append(pwd)
         self.master.update()  # keep clipboard after app closes
-        messagebox.showinfo(APP_NAME, "Password copied to clipboard.\n\n"
-                                      "You can now paste it into your password manager.")
+        messagebox.showinfo(
+            APP_NAME,
+            "Password copied to clipboard.\n\n"
+            "You can now paste it into your password manager."
+        )
 
     # ---------- Actions ----------
 
@@ -458,6 +506,7 @@ def open_locked_file(file_path: str):
     - Decrypt file to temp folder
     - Open it with the default associated program
     """
+    enable_high_dpi()
     root = tk.Tk()
     root.withdraw()  # hide main window
 
@@ -514,9 +563,9 @@ def open_locked_file(file_path: str):
 # ---------- Entrypoint ----------
 
 def run_gui():
+    enable_high_dpi()
     root = tk.Tk()
     app = Encrypt0rApp(root)
-    root.minsize(780, 500)
     root.mainloop()
 
 
