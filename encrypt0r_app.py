@@ -3,6 +3,7 @@ import sys
 import base64
 import secrets
 import tempfile
+import hashlib
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from tkinter.scrolledtext import ScrolledText
@@ -65,14 +66,64 @@ def derive_key_from_password(password: str, salt: bytes) -> bytes:
     return base64.urlsafe_b64encode(key)
 
 
+def build_encrypted_payload(filename: str, file_bytes: bytes, password: str) -> bytes:
+    """
+    Build the encrypted payload for a file:
+    - 16 bytes salt
+    - Fernet(ciphertext) of:
+      [4 bytes filename_length][filename UTF-8][file data]
+    Returns bytes ready to write to disk (without deciding the encrypted filename).
+    """
+    salt = secrets.token_bytes(16)
+    key = derive_key_from_password(password, salt)
+    fernet = Fernet(key)
+
+    name_bytes = filename.encode("utf-8")
+    name_len = len(name_bytes).to_bytes(4, byteorder="big")
+    plaintext_blob = name_len + name_bytes + file_bytes
+
+    ciphertext = fernet.encrypt(plaintext_blob)
+    return salt + ciphertext
+
+
+def decrypt_encrypted_payload(data: bytes, password: str) -> tuple[str, bytes]:
+    """
+    Reverse of build_encrypted_payload.
+    Given raw bytes from an encrypted file and the password, return:
+        (original_filename, file_bytes)
+    Raises on failure (wrong password/corruption).
+    """
+    if len(data) < 17:
+        raise ValueError("Encrypted file is too small.")
+
+    salt = data[:16]
+    ciphertext = data[16:]
+
+    key = derive_key_from_password(password, salt)
+    fernet = Fernet(key)
+    plaintext_blob = fernet.decrypt(ciphertext)
+
+    if len(plaintext_blob) < 4:
+        raise ValueError("Decrypted data is too small for header.")
+
+    name_len = int.from_bytes(plaintext_blob[:4], byteorder="big")
+    if len(plaintext_blob) < 4 + name_len:
+        raise ValueError("Filename length header is invalid.")
+
+    name_bytes = plaintext_blob[4:4 + name_len]
+    filename = name_bytes.decode("utf-8", errors="replace")
+    file_bytes = plaintext_blob[4 + name_len:]
+
+    return filename, file_bytes
+
+
 def encrypt_file(path: str, password: str, delete_original: bool, log_callback):
     """
     Encrypt a single file:
-    - Generate a random salt
-    - Derive key using password + salt
-    - Encrypt with Fernet
-    - Write [salt][ciphertext] to <path>.locked
-    - Optionally delete original
+    - Read original bytes
+    - Build encrypted payload that includes original filename
+    - Store on disk using a hashed filename + .locked extension
+    - Optionally delete original file
     """
     if path.endswith(LOCK_EXTENSION):
         log_callback(f"Skipping already encrypted file: {path}")
@@ -85,17 +136,20 @@ def encrypt_file(path: str, password: str, delete_original: bool, log_callback):
         log_callback(f"Failed to read {path}: {e}")
         return False
 
+    original_name = os.path.basename(path)
     log_callback(f"Encrypting: {path}")
 
-    salt = secrets.token_bytes(16)
-    key = derive_key_from_password(password, salt)
-    fernet = Fernet(key)
-    ciphertext = fernet.encrypt(plaintext)
+    payload = build_encrypted_payload(original_name, plaintext, password)
 
-    out_path = path + LOCK_EXTENSION
+    # Encrypted filename: hash(original_name + random salt-ish) to hide real name on disk
+    hash_input = original_name.encode("utf-8") + payload[:16]
+    hashed_name = hashlib.sha256(hash_input).hexdigest()[:32]  # shorten a bit
+    dir_name = os.path.dirname(path)
+    encrypted_path = os.path.join(dir_name, hashed_name + LOCK_EXTENSION)
+
     try:
-        with open(out_path, "wb") as f:
-            f.write(salt + ciphertext)
+        with open(encrypted_path, "wb") as f:
+            f.write(payload)
     except Exception as e:
         log_callback(f"Failed to write encrypted file for {path}: {e}")
         return False
@@ -107,17 +161,16 @@ def encrypt_file(path: str, password: str, delete_original: bool, log_callback):
         except Exception as e:
             log_callback(f"Failed to delete original {path}: {e}")
 
+    log_callback(f"Stored as: {encrypted_path}")
     return True
 
 
 def decrypt_file(path: str, password: str, log_callback):
     """
     Decrypt a single .locked file:
-    - Read first 16 bytes as salt
-    - Rest is ciphertext
-    - Derive key using same salt + password
-    - Decrypt with Fernet
-    - Write to file without .locked extension
+    - Read raw bytes
+    - Decrypt and recover original filename and content
+    - Write out using original filename in the same directory
     - Delete encrypted file on success
     Returns True if decryption succeeded, False otherwise.
     """
@@ -132,27 +185,18 @@ def decrypt_file(path: str, password: str, log_callback):
         log_callback(f"Failed to read {path}: {e}")
         return False
 
-    if len(data) < 17:
-        log_callback(f"File too small / corrupted: {path}")
-        return False
-
-    salt = data[:16]
-    ciphertext = data[16:]
-
-    key = derive_key_from_password(password, salt)
-    fernet = Fernet(key)
-
     try:
-        plaintext = fernet.decrypt(ciphertext)
+        original_name, file_bytes = decrypt_encrypted_payload(data, password)
     except Exception as e:
-        # Wrong password or corrupted file
         log_callback(f"Failed to decrypt {path}: {e}")
         return False
 
-    out_path = path[: -len(LOCK_EXTENSION)]
+    out_dir = os.path.dirname(path)
+    out_path = os.path.join(out_dir, original_name)
+
     try:
         with open(out_path, "wb") as f:
-            f.write(plaintext)
+            f.write(file_bytes)
     except Exception as e:
         log_callback(f"Failed to write decrypted file for {path}: {e}")
         return False
@@ -163,6 +207,7 @@ def decrypt_file(path: str, password: str, log_callback):
     except Exception as e:
         log_callback(f"Failed to remove encrypted file {path}: {e}")
 
+    log_callback(f"Restored original name: {out_path}")
     return True
 
 
@@ -173,8 +218,10 @@ class Encrypt0rApp:
         self.master = master
         master.title(APP_NAME)
 
-        # Base window styling
+        # Make window larger & resizable
         master.configure(bg=BG_MAIN)
+        master.minsize(900, 600)
+        master.resizable(True, True)
 
         # Try to set icon if available
         try:
@@ -248,7 +295,7 @@ class Encrypt0rApp:
 
         subtitle_label = ttk.Label(
             frame,
-            text="Encrypt and decrypt folders with a single password.",
+            text="Encrypt and decrypt folders with a single password. Filenames are hidden too.",
             style="Encrypt0r.Subtle.TLabel"
         )
         subtitle_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
@@ -353,16 +400,6 @@ class Encrypt0rApp:
         # Layout stretch
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(9, weight=1)
-
-        # Center window a bit (optional quality of life)
-        master.update_idletasks()
-        w = 780
-        h = 520
-        sw = master.winfo_screenwidth()
-        sh = master.winfo_screenheight()
-        x = int((sw - w) / 2)
-        y = int((sh - h) / 2)
-        master.geometry(f"{w}x{h}+{x}+{y}")
 
     # ---------- UI helpers ----------
 
@@ -503,7 +540,7 @@ def open_locked_file(file_path: str):
     """
     When encrypt0r.exe is launched with a .locked file directly:
     - Ask password via GUI popup
-    - Decrypt file to temp folder
+    - Decrypt file to temp folder with original filename
     - Open it with the default associated program
     """
     enable_high_dpi()
@@ -525,30 +562,19 @@ def open_locked_file(file_path: str):
         messagebox.showerror(APP_NAME, f"Failed to read file:\n{e}")
         return
 
-    if len(data) < 17:
-        messagebox.showerror(APP_NAME, "File is too small or corrupted.")
-        return
-
-    salt = data[:16]
-    ciphertext = data[16:]
-
-    key = derive_key_from_password(password, salt)
-    fernet = Fernet(key)
-
     try:
-        plaintext = fernet.decrypt(ciphertext)
+        original_name, file_bytes = decrypt_encrypted_payload(data, password)
     except Exception:
         messagebox.showerror(APP_NAME, "Incorrect password or corrupted file.")
         return
 
-    # Create a temporary file for viewing
-    original_path = file_path[:-len(LOCK_EXTENSION)]  # remove .locked
-    file_name = os.path.basename(original_path)
+    # Create a temporary file for viewing with the original filename
+    file_name = original_name
     temp_path = os.path.join(tempfile.gettempdir(), file_name)
 
     try:
         with open(temp_path, "wb") as f:
-            f.write(plaintext)
+            f.write(file_bytes)
     except Exception as e:
         messagebox.showerror(APP_NAME, f"Failed to write temporary file:\n{e}")
         return
