@@ -18,6 +18,10 @@ APP_NAME = "encrypt0r"
 LOCK_EXTENSION = ".locked"
 PBKDF2_ITERATIONS = 390000  # reasonably strong
 
+# Security timers
+AUTO_CLEAR_MINUTES = 5       # clear passwords after X minutes of inactivity
+SHOW_PLAIN_SECONDS = 20      # auto-hide password after X seconds shown
+
 # Dark theme colors
 BG_MAIN = "#020617"      # almost black (slate-950)
 BG_INPUT = "#020617"
@@ -251,6 +255,12 @@ class Encrypt0rApp:
         # Track individually selected files (optional)
         self.selected_files = []
 
+        # Security timers
+        self.inactivity_ms = AUTO_CLEAR_MINUTES * 60 * 1000
+        self.show_timeout_ms = SHOW_PLAIN_SECONDS * 1000
+        self.inactivity_after_id = None
+        self.show_timeout_after_id = None
+
         # Make window larger & resizable
         master.configure(bg=BG_MAIN)
         master.minsize(900, 600)
@@ -450,6 +460,57 @@ class Encrypt0rApp:
         frame.columnconfigure(1, weight=1)
         frame.rowconfigure(9, weight=1)
 
+        # Bind activity for auto-clear (key presses in password fields)
+        self.password_entry.bind("<Key>", self.on_user_activity)
+        self.confirm_entry.bind("<Key>", self.on_user_activity)
+
+        # Start inactivity timer
+        self.reset_inactivity_timer()
+
+    # ---------- Security timers ----------
+
+    def on_user_activity(self, event=None):
+        self.reset_inactivity_timer()
+
+    def reset_inactivity_timer(self):
+        if self.inactivity_after_id is not None:
+            self.master.after_cancel(self.inactivity_after_id)
+        self.inactivity_after_id = self.master.after(self.inactivity_ms, self.on_inactivity_timeout)
+
+    def on_inactivity_timeout(self):
+        # Only log/clear if there is something to clear
+        if self.password_var.get() or self.confirm_var.get():
+            self.log("No activity detected. Clearing password fields for security.")
+            self.clear_password_fields()
+        self.inactivity_after_id = None
+
+    def start_show_timeout(self):
+        if self.show_timeout_after_id is not None:
+            self.master.after_cancel(self.show_timeout_after_id)
+        self.show_timeout_after_id = self.master.after(self.show_timeout_ms, self.on_show_timeout)
+
+    def cancel_show_timeout(self):
+        if self.show_timeout_after_id is not None:
+            self.master.after_cancel(self.show_timeout_after_id)
+            self.show_timeout_after_id = None
+
+    def on_show_timeout(self):
+        # If still showing, hide it again
+        if self.show_password_var.get():
+            self.show_password_var.set(False)
+            self.password_entry.config(show="*")
+            self.confirm_entry.config(show="*")
+            self.log("Password visibility timeout reached; hiding password for security.")
+        self.show_timeout_after_id = None
+
+    def clear_password_fields(self):
+        self.password_var.set("")
+        self.confirm_var.set("")
+        self.show_password_var.set(False)
+        self.password_entry.config(show="*")
+        self.confirm_entry.config(show="*")
+        self.cancel_show_timeout()
+
     # ---------- UI helpers ----------
 
     def log(self, message: str):
@@ -465,6 +526,7 @@ class Encrypt0rApp:
             self.folder_var.set(folder)
             # Clear selected files when switching back to folder mode
             self.selected_files = []
+            self.on_user_activity()
 
     def select_files(self):
         """Let the user pick individual files to encrypt/decrypt."""
@@ -482,6 +544,7 @@ class Encrypt0rApp:
             self.folder_var.set(first_dir)
 
         self.log(f"Selected {len(self.selected_files)} individual file(s).")
+        self.on_user_activity()
 
     def validate_common_inputs(self):
         folder = self.folder_var.get()
@@ -516,6 +579,15 @@ class Encrypt0rApp:
         self.password_entry.config(show=show_char)
         self.confirm_entry.config(show=show_char)
 
+        if self.show_password_var.get():
+            # Just turned "show" ON -> start timeout
+            self.start_show_timeout()
+        else:
+            # Just turned "show" OFF -> cancel timeout
+            self.cancel_show_timeout()
+
+        self.on_user_activity()
+
     def copy_password_to_clipboard(self):
         pwd = self.password_var.get()
         if not pwd:
@@ -529,10 +601,12 @@ class Encrypt0rApp:
             "Password copied to clipboard.\n\n"
             "You can now paste it into your password manager."
         )
+        self.on_user_activity()
 
     # ---------- Actions ----------
 
     def lock_folder(self):
+        self.on_user_activity()
         folder, password = self.validate_common_inputs()
         if folder is None:
             return
@@ -581,12 +655,14 @@ class Encrypt0rApp:
 
         self.log(f"\nFinished encrypting. Processed {files_processed} files; "
                  f"successfully encrypted {files_encrypted} files.")
+        self.clear_password_fields()
         messagebox.showinfo(APP_NAME, "Folder/file encryption finished.")
 
     def unlock_folder(self):
         """
         Decrypt .locked files in the selected folder or from individually selected files.
         """
+        self.on_user_activity()
         folder, password = self.validate_common_inputs()
         if folder is None:
             return
@@ -629,6 +705,7 @@ class Encrypt0rApp:
                     "This usually means the password is incorrect or the files are corrupted."
                 )
             else:
+                self.clear_password_fields()
                 messagebox.showinfo(APP_NAME, "Folder/file decryption finished.")
 
 
