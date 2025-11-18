@@ -123,10 +123,20 @@ def encrypt_file(path: str, password: str, delete_original: bool, log_callback):
     - Read original bytes
     - Build encrypted payload that includes original filename
     - Store on disk using a hashed filename + .locked extension
+    - Copy original timestamps to the .locked file
     - Optionally delete original file
     """
     if path.endswith(LOCK_EXTENSION):
         log_callback(f"Skipping already encrypted file: {path}")
+        return False
+
+    # Capture original timestamps before touching the file
+    try:
+        st = os.stat(path)
+        original_atime = st.st_atime
+        original_mtime = st.st_mtime
+    except Exception as e:
+        log_callback(f"Failed to stat {path}: {e}")
         return False
 
     try:
@@ -150,6 +160,11 @@ def encrypt_file(path: str, password: str, delete_original: bool, log_callback):
     try:
         with open(encrypted_path, "wb") as f:
             f.write(payload)
+        # Apply original timestamps to the encrypted file
+        try:
+            os.utime(encrypted_path, (original_atime, original_mtime))
+        except Exception as e:
+            log_callback(f"Warning: failed to copy timestamps for {encrypted_path}: {e}")
     except Exception as e:
         log_callback(f"Failed to write encrypted file for {path}: {e}")
         return False
@@ -172,10 +187,20 @@ def decrypt_file(path: str, password: str, log_callback):
     - Decrypt and recover original filename and content
     - Write out using original filename in the same directory
     - Delete encrypted file on success
+    - Preserve timestamp from .locked file on restored file
     Returns True if decryption succeeded, False otherwise.
     """
     if not path.endswith(LOCK_EXTENSION):
         log_callback(f"Skipping non-encrypted file: {path}")
+        return False
+
+    # Capture timestamps from the encrypted file so we can reuse them
+    try:
+        st = os.stat(path)
+        enc_atime = st.st_atime
+        enc_mtime = st.st_mtime
+    except Exception as e:
+        log_callback(f"Failed to stat encrypted file {path}: {e}")
         return False
 
     try:
@@ -197,6 +222,11 @@ def decrypt_file(path: str, password: str, log_callback):
     try:
         with open(out_path, "wb") as f:
             f.write(file_bytes)
+        # Restore timestamp from encrypted file
+        try:
+            os.utime(out_path, (enc_atime, enc_mtime))
+        except Exception as e:
+            log_callback(f"Warning: failed to copy timestamps to {out_path}: {e}")
     except Exception as e:
         log_callback(f"Failed to write decrypted file for {path}: {e}")
         return False
@@ -211,12 +241,15 @@ def decrypt_file(path: str, password: str, log_callback):
     return True
 
 
-# ---------- GUI app (folder mode) ----------
+# ---------- GUI app (folder + files mode) ----------
 
 class Encrypt0rApp:
     def __init__(self, master):
         self.master = master
         master.title(APP_NAME)
+
+        # Track individually selected files (optional)
+        self.selected_files = []
 
         # Make window larger & resizable
         master.configure(bg=BG_MAIN)
@@ -300,7 +333,7 @@ class Encrypt0rApp:
         )
         subtitle_label.grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
 
-        # Folder selection
+        # Folder / files selection
         folder_label = ttk.Label(frame, text="Folder", style="Encrypt0r.TLabel")
         folder_label.grid(row=2, column=0, padx=(0, 8), pady=5, sticky="e")
 
@@ -309,10 +342,26 @@ class Encrypt0rApp:
                                       width=50, style="Encrypt0r.TEntry")
         self.folder_entry.grid(row=2, column=1, padx=(0, 8), pady=5, sticky="we")
 
-        self.browse_button = ttk.Button(frame, text="Browse...",
-                                        style="Encrypt0r.Secondary.TButton",
-                                        command=self.browse_folder)
-        self.browse_button.grid(row=2, column=2, pady=5, sticky="we")
+        # Right side: folder + files buttons
+        folder_btns = ttk.Frame(frame, style="Encrypt0r.TFrame")
+        folder_btns.grid(row=2, column=2, pady=5, sticky="nsew")
+        folder_btns.columnconfigure(0, weight=1)
+
+        browse_folder_btn = ttk.Button(
+            folder_btns,
+            text="Browse folder",
+            style="Encrypt0r.Secondary.TButton",
+            command=self.browse_folder
+        )
+        browse_folder_btn.grid(row=0, column=0, sticky="ew", pady=(0, 2))
+
+        select_files_btn = ttk.Button(
+            folder_btns,
+            text="Select files",
+            style="Encrypt0r.Secondary.TButton",
+            command=self.select_files
+        )
+        select_files_btn.grid(row=1, column=0, sticky="ew")
 
         # Password row
         password_label = ttk.Label(frame, text="Password", style="Encrypt0r.TLabel")
@@ -368,7 +417,7 @@ class Encrypt0rApp:
 
         self.lock_button = ttk.Button(
             buttons_frame,
-            text="Lock (Encrypt) Folder",
+            text="Lock (Encrypt)",
             style="Encrypt0r.TButton",
             command=self.lock_folder
         )
@@ -376,7 +425,7 @@ class Encrypt0rApp:
 
         self.unlock_button = ttk.Button(
             buttons_frame,
-            text="Unlock (Decrypt) Folder",
+            text="Unlock (Decrypt)",
             style="Encrypt0r.Secondary.TButton",
             command=self.unlock_folder
         )
@@ -414,19 +463,50 @@ class Encrypt0rApp:
         folder = filedialog.askdirectory()
         if folder:
             self.folder_var.set(folder)
+            # Clear selected files when switching back to folder mode
+            self.selected_files = []
+
+    def select_files(self):
+        """Let the user pick individual files to encrypt/decrypt."""
+        files = filedialog.askopenfilenames(
+            title="Select files to encrypt/decrypt"
+        )
+        if not files:
+            return
+
+        self.selected_files = list(files)
+
+        # Set folder field to the directory of the first selected file (for context)
+        first_dir = os.path.dirname(self.selected_files[0])
+        if first_dir:
+            self.folder_var.set(first_dir)
+
+        self.log(f"Selected {len(self.selected_files)} individual file(s).")
 
     def validate_common_inputs(self):
         folder = self.folder_var.get()
         password = self.password_var.get()
 
+        if not password:
+            messagebox.showerror(APP_NAME, "Please enter a password.")
+            return None, None
+
+        # If user selected individual files, we don't strictly require a valid folder
+        if self.selected_files:
+            existing = [f for f in self.selected_files if os.path.isfile(f)]
+            if not existing:
+                messagebox.showerror(APP_NAME, "Selected files no longer exist.")
+                self.selected_files = []
+                return None, None
+            self.selected_files = existing
+            return folder, password
+
+        # Folder mode fallback (no individual files)
         if not folder:
-            messagebox.showerror(APP_NAME, "Please select a folder.")
+            messagebox.showerror(APP_NAME, "Please select a folder or individual files.")
             return None, None
         if not os.path.isdir(folder):
             messagebox.showerror(APP_NAME, "Selected folder does not exist.")
-            return None, None
-        if not password:
-            messagebox.showerror(APP_NAME, "Please enter a password.")
             return None, None
 
         return folder, password
@@ -475,52 +555,70 @@ class Encrypt0rApp:
             ):
                 return
 
+        # Decide what we are encrypting: selected files or all files in folder
+        if self.selected_files:
+            targets = list(self.selected_files)
+            mode_desc = f"{len(targets)} selected file(s)"
+        else:
+            targets = []
+            for root, dirs, files in os.walk(folder):
+                for name in files:
+                    targets.append(os.path.join(root, name))
+            mode_desc = f"all files under: {folder}"
+
         self.log("=== Locking (encrypting) folder ===")
-        self.log(f"Folder: {folder}")
+        self.log(f"Mode: {mode_desc}")
         self.log(f"Delete originals: {delete_originals}")
         self.log("Do NOT close encrypt0r while processing.\n")
 
         files_processed = 0
         files_encrypted = 0
 
-        for root, dirs, files in os.walk(folder):
-            for name in files:
-                full_path = os.path.join(root, name)
-                files_processed += 1
-                if encrypt_file(full_path, password, delete_originals, self.log):
-                    files_encrypted += 1
+        for full_path in targets:
+            files_processed += 1
+            if encrypt_file(full_path, password, delete_originals, self.log):
+                files_encrypted += 1
 
         self.log(f"\nFinished encrypting. Processed {files_processed} files; "
                  f"successfully encrypted {files_encrypted} files.")
-        messagebox.showinfo(APP_NAME, "Folder encryption finished.")
+        messagebox.showinfo(APP_NAME, "Folder/file encryption finished.")
 
     def unlock_folder(self):
         """
-        Decrypt all .locked files in the selected folder (recursively).
-        Only works with the correct password; wrong password => decryption fails.
+        Decrypt .locked files in the selected folder or from individually selected files.
         """
         folder, password = self.validate_common_inputs()
         if folder is None:
             return
 
+        # Decide what we are decrypting: selected files or all .locked under folder
+        if self.selected_files:
+            all_candidates = list(self.selected_files)
+            targets = [p for p in all_candidates if p.lower().endswith(LOCK_EXTENSION)]
+            mode_desc = f"{len(targets)} selected .locked file(s)"
+        else:
+            targets = []
+            for root, dirs, files in os.walk(folder):
+                for name in files:
+                    full_path = os.path.join(root, name)
+                    if full_path.lower().endswith(LOCK_EXTENSION):
+                        targets.append(full_path)
+            mode_desc = f".locked files under: {folder}"
+
         self.log("=== Unlocking (decrypting) folder ===")
-        self.log(f"Folder: {folder}")
+        self.log(f"Mode: {mode_desc}")
         self.log("Do NOT close encrypt0r while processing.\n")
 
-        files_found = 0
+        files_found = len(targets)
         files_decrypted = 0
 
-        for root, dirs, files in os.walk(folder):
-            for name in files:
-                full_path = os.path.join(root, name)
-                if full_path.endswith(LOCK_EXTENSION):
-                    files_found += 1
-                    if decrypt_file(full_path, password, self.log):
-                        files_decrypted += 1
+        for full_path in targets:
+            if decrypt_file(full_path, password, self.log):
+                files_decrypted += 1
 
         if files_found == 0:
-            self.log("No encrypted (.locked) files found in this folder.")
-            messagebox.showinfo(APP_NAME, "No encrypted files found in this folder.")
+            self.log("No encrypted (.locked) files found.")
+            messagebox.showinfo(APP_NAME, "No encrypted files found.")
         else:
             self.log(f"\nFinished decrypting. Found {files_found} encrypted files; "
                      f"successfully decrypted {files_decrypted} files.")
@@ -531,7 +629,7 @@ class Encrypt0rApp:
                     "This usually means the password is incorrect or the files are corrupted."
                 )
             else:
-                messagebox.showinfo(APP_NAME, "Folder decryption finished.")
+                messagebox.showinfo(APP_NAME, "Folder/file decryption finished.")
 
 
 # ---------- Single-file mode for .locked double-click ----------
@@ -600,5 +698,5 @@ if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1].lower().endswith(LOCK_EXTENSION):
         open_locked_file(sys.argv[1])
     else:
-        # Normal GUI (folder mode)
+        # Normal GUI (folder/files mode)
         run_gui()
